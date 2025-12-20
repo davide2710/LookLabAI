@@ -1,14 +1,12 @@
-
 import { GoogleGenAI, Type, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { LookMetrics } from "../types";
 
-// Helper to get a fresh AI client instance every time
 const getAiClient = () => {
-  const apiKey = process.env.API_KEY;
+  // Legge la chiave direttamente dal processo globale, che viene aggiornato dal selettore Pro
+  const apiKey = (window as any).process?.env?.API_KEY;
   if (!apiKey || apiKey.length === 0) {
     throw new Error("API_KEY_MISSING");
   }
-  // We create a new instance right before the call to ensure it uses the latest key (e.g. from openSelectKey)
   return new GoogleGenAI({ apiKey });
 };
 
@@ -61,14 +59,14 @@ export const analyzeLookMetrics = async (dataUrlOrBase64: string): Promise<LookM
       data = parsed.data;
   }
   
-  const prompt = `Analyze the aesthetic qualities of this image for a professional photography color grading tool. 
-  Return a JSON object with integer values between 0 and 100 for: contrast, saturation, warmth, uniformity, exposure.`;
-
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview", // Upgraded to Gemini 3
+      model: "gemini-3-flash-preview",
       contents: {
-        parts: [{ inlineData: { mimeType, data } }, { text: prompt }]
+        parts: [
+          { inlineData: { mimeType, data } }, 
+          { text: "Analyze contrast, saturation, warmth, uniformity, exposure (0-100) as JSON." }
+        ]
       },
       config: {
         responseMimeType: "application/json",
@@ -80,17 +78,16 @@ export const analyzeLookMetrics = async (dataUrlOrBase64: string): Promise<LookM
             warmth: { type: Type.INTEGER },
             uniformity: { type: Type.INTEGER },
             exposure: { type: Type.INTEGER },
-          }
+          },
+          required: ["contrast", "saturation", "warmth", "uniformity", "exposure"]
         }
       }
     });
 
-    if (response.text) {
-      return JSON.parse(response.text) as LookMetrics;
-    }
-    throw new Error("No data returned");
+    return JSON.parse(response.text || "{}") as LookMetrics;
   } catch (error: any) {
-    if (error.message?.includes("429")) throw new Error("QUOTA_EXCEEDED");
+    const msg = error.message || "";
+    if (msg.includes("429") || msg.includes("quota")) throw new Error("QUOTA_EXCEEDED");
     throw error;
   }
 };
@@ -105,22 +102,20 @@ export const applyLookTransfer = async (
   const ref = parseDataUrl(referenceDataUrl);
   const target = parseDataUrl(targetDataUrl);
 
-  const prompt = `Apply the color grading and mood of the Reference Style Image to the Target Image.
-  Style Preset: ${preset}. Return only the edited image part.`;
-
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-pro-image-preview", // Upgraded to Pro for better quality and higher quota with paid key
+      model: "gemini-3-pro-image-preview",
       contents: {
         parts: [
-          { text: "Target Image:" },
+          { text: `Apply ${preset} style from reference to target. Return image.` },
+          { text: "Target:" },
           { inlineData: { mimeType: target.mimeType, data: target.data } }, 
-          { text: "Reference Style Image:" },
-          { inlineData: { mimeType: ref.mimeType, data: ref.data } },       
-          { text: prompt }
+          { text: "Reference:" },
+          { inlineData: { mimeType: ref.mimeType, data: ref.data } }
         ]
       },
       config: {
+        imageConfig: { aspectRatio: "1:1" },
         safetySettings: [
           { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
           { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -130,16 +125,10 @@ export const applyLookTransfer = async (
       }
     });
 
-    if (!response.candidates || response.candidates.length === 0) {
-        throw new Error("Generation blocked or unavailable.");
-    }
-
-    const firstCandidate = response.candidates[0];
     let generatedBase64 = null;
-
-    if (firstCandidate.content?.parts) {
-        for (const part of firstCandidate.content.parts) {
-            if (part.inlineData && part.inlineData.data) {
+    if (response.candidates?.[0]?.content?.parts) {
+        for (const part of response.candidates[0].content.parts) {
+            if (part.inlineData?.data) {
                 generatedBase64 = `data:image/png;base64,${part.inlineData.data}`;
                 break;
             }
@@ -149,12 +138,12 @@ export const applyLookTransfer = async (
     if (generatedBase64) {
         return await blendImages(targetDataUrl, generatedBase64, intensity);
     }
-    
-    throw new Error("No image data found in response");
+    throw new Error("No image generated");
 
   } catch (error: any) {
-    if (error.message?.includes("429")) throw new Error("QUOTA_EXCEEDED");
-    if (error.message?.includes("Requested entity was not found")) throw new Error("KEY_INVALID");
+    const msg = error.message || "";
+    if (msg.includes("429") || msg.includes("quota")) throw new Error("QUOTA_EXCEEDED");
+    if (msg.includes("not found")) throw new Error("KEY_INVALID");
     throw error;
   }
 };
